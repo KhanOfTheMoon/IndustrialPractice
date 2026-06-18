@@ -47,11 +47,11 @@ async def analyze(
             "error": "end_page must be greater than or equal to start_page"
         }
 
-    allowed_sources = ["all", "satu", "ozon"]
+    allowed_sources = ["all", "satu", "dns"]
 
     if selected_source not in allowed_sources:
         return {
-            "error": "selected_source must be one of: all, satu, ozon"
+            "error": "selected_source must be one of: all, satu, dns"
         }
 
     products = await scrape_products(
@@ -62,10 +62,18 @@ async def analyze(
         selected_category=selected_category,
         selected_source=selected_source,
     )
+    scraper_metadata = getattr(products, "metadata", {}) or {}
+    response_query_metadata = {
+        "original_query": scraper_metadata.get("original_query", query),
+        "used_search_query": scraper_metadata.get("used_search_query", query),
+        "query_variants": scraper_metadata.get("query_variants", [query]),
+        "include_services": scraper_metadata.get("include_services", False),
+    }
 
     if not products:
         return {
             "query": query,
+            **response_query_metadata,
             "selected_category": selected_category,
             "selected_source": selected_source,
             "start_page": start_page,
@@ -74,7 +82,7 @@ async def analyze(
             "strict_title_match": strict_title_match,
             "best_limit": best_limit,
             "total_found": 0,
-            "message": "No relevant products found"
+            "message": scraper_metadata.get("message") or "No relevant products found"
         }
 
     total_before_outlier_filter = len(products)
@@ -88,6 +96,7 @@ async def analyze(
     if not products:
         return {
             "query": query,
+            **response_query_metadata,
             "selected_category": selected_category,
             "selected_source": selected_source,
             "start_page": start_page,
@@ -107,6 +116,7 @@ async def analyze(
 
     return {
         "query": query,
+        **response_query_metadata,
         "selected_category": selected_category,
         "selected_source": selected_source,
         "start_page": start_page,

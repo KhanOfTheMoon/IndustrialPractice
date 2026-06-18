@@ -1,7 +1,8 @@
 import asyncio
 
+from app.scraper.result import ScrapeResult
 from app.scraper.satu_scraper import scrape_products as scrape_satu_products
-from app.scraper.ozon_scraper import scrape_products as scrape_ozon_products
+from app.scraper.dns_scraper import scrape_products as scrape_dns_products
 
 
 async def scrape_products(
@@ -25,9 +26,9 @@ async def scrape_products(
             )
         )
 
-    if selected_source in ["all", "ozon"]:
+    if selected_source in ["all", "dns"]:
         tasks.append(
-            scrape_ozon_products(
+            scrape_dns_products(
                 query=query,
                 start_page=start_page,
                 end_page=end_page,
@@ -42,12 +43,18 @@ async def scrape_products(
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     products = []
+    metadata = {}
 
     for result in results:
         if isinstance(result, Exception):
             print("SCRAPER ERROR:", result)
             continue
 
+        result_metadata = getattr(result, "metadata", None)
+
+        if result_metadata:
+            metadata.update(result_metadata)
+
         products.extend(result)
 
-    return products
+    return ScrapeResult(products, metadata)

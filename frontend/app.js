@@ -62,12 +62,12 @@ function getSourceLabel(source) {
         return "Satu.kz";
     }
 
-    if (source === "ozon") {
-        return "Ozon.kz";
+    if (source === "dns") {
+        return "DNS";
     }
 
     if (source === "all") {
-        return "Satu.kz + Ozon.kz";
+        return "Satu.kz + DNS";
     }
 
     return source || "Не указан";
@@ -361,7 +361,7 @@ async function analyzeProduct() {
 
     resultDiv.innerHTML = `
         <div class="loading">
-            Идёт поиск и анализ товаров. Если выбран Ozon.kz или несколько страниц, это может занять дольше.
+            Идёт поиск и анализ товаров. Если выбран DNS или несколько страниц, это может занять дольше.
         </div>
     `;
 

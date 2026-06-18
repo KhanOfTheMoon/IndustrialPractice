@@ -2,9 +2,15 @@ from urllib.parse import quote_plus
 
 import httpx
 
+from app.scraper.result import ScrapeResult
 from app.services.category_detector import resolve_category
 from app.services.category_config import get_satu_category_id, get_search_prefix
-from app.services.cleaner import is_relevant_product, remove_duplicates
+from app.services.cleaner import (
+    build_query_variants,
+    detect_service_query,
+    is_relevant_product,
+    remove_duplicates,
+)
 from app.services.cross_category_filter import is_wrong_category_product
 
 
@@ -164,6 +170,7 @@ def parse_product_item(
     category: str,
     source_page: int,
     strict_title_match: bool,
+    include_services: bool = False,
 ) -> dict | None:
     product = item.get("product")
 
@@ -180,10 +187,12 @@ def parse_product_item(
     if price is None:
         return None
 
-    if product.get("isService"):
+    is_service = bool(product.get("isService"))
+
+    if is_service and not include_services:
         return None
 
-    if is_wrong_category_product(title, category):
+    if is_wrong_category_product(title, category) and not include_services:
         return None
 
     if not is_relevant_product(
@@ -272,15 +281,26 @@ async def scrape_products(
     strict_title_match: bool = False,
     selected_category: str = "auto",
 ) -> list[dict]:
-    category = resolve_category(query, selected_category)
-    search_query = build_search_query(query, category)
+    original_query = query
+    category = resolve_category(original_query, selected_category)
+    query_variants = build_query_variants(original_query)
+    include_services = detect_service_query(original_query)
+
+    metadata = {
+        "original_query": original_query,
+        "used_search_query": None,
+        "query_variants": query_variants,
+        "include_services": include_services,
+        "message": None,
+    }
 
     print("FAST GRAPHQL SCRAPER")
-    print("RAW QUERY:", repr(query))
-    print("USER QUERY:", query)
+    print("RAW QUERY:", repr(original_query))
+    print("ORIGINAL QUERY:", original_query)
+    print("QUERY VARIANTS:", query_variants)
     print("SELECTED CATEGORY:", selected_category)
     print("RESOLVED CATEGORY:", category)
-    print("SEARCH QUERY:", search_query)
+    print("INCLUDE SERVICES:", include_services)
     print("PAGE RANGE:", start_page, "-", end_page)
     print("STRICT TITLE MATCH:", strict_title_match)
 
@@ -290,8 +310,6 @@ async def scrape_products(
     skipped_not_relevant = 0
     skipped_service = 0
     skipped_wrong_category = 0
-
-    encoded_search_query = quote_plus(search_query)
 
     headers = {
         "accept": "*/*",
@@ -306,7 +324,7 @@ async def scrape_products(
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
         ),
-        "referer": f"{BASE_URL}/search?search_term={encoded_search_query}",
+        "referer": BASE_URL,
         "origin": BASE_URL,
     }
 
@@ -316,71 +334,115 @@ async def scrape_products(
             timeout=30,
             follow_redirects=True,
         ) as client:
-            for page_number in range(start_page, end_page + 1):
-                print(f"FETCHING PAGE {page_number}")
-
-                data = await fetch_graphql_page(
-                    client=client,
-                    search_query=search_query,
-                    page_number=page_number,
-                    category=category,
+            for variant_index, query_variant in enumerate(query_variants):
+                search_query = build_search_query(query_variant, category)
+                metadata["used_search_query"] = search_query
+                client.headers["referer"] = (
+                    f"{BASE_URL}/search?search_term={quote_plus(search_query)}"
                 )
 
-                if "errors" in data:
-                    print("GRAPHQL ERRORS:", data["errors"])
-                    break
+                print("TRYING QUERY VARIANT:", query_variant)
+                print("USED SEARCH QUERY:", search_query)
 
-                listing = data.get("data", {}).get("listing", {})
-                page = listing.get("page", {})
-                items = page.get("products") or []
+                variant_products = []
+                variant_had_items = False
 
-                print(f"PAGE {page_number} ITEMS:", len(items))
+                for page_number in range(start_page, end_page + 1):
+                    print(f"FETCHING PAGE {page_number}")
 
-                if not items:
-                    break
-
-                products_before_page = len(products)
-
-                for item in items:
-                    product = item.get("product") or {}
-                    title = product.get("name") or ""
-
-                    if product.get("isService"):
-                        skipped_service += 1
-                        continue
-
-                    if get_product_price(product) is None:
-                        skipped_no_price += 1
-                        continue
-
-                    if is_wrong_category_product(title, category):
-                        skipped_wrong_category += 1
-                        continue
-
-                    parsed_product = parse_product_item(
-                        item=item,
-                        query=query,
+                    data = await fetch_graphql_page(
+                        client=client,
+                        search_query=search_query,
+                        page_number=page_number,
                         category=category,
-                        source_page=page_number,
-                        strict_title_match=strict_title_match,
                     )
 
-                    if not parsed_product:
-                        skipped_not_relevant += 1
-                        continue
+                    if "errors" in data:
+                        print("GRAPHQL ERRORS:", data["errors"])
+                        break
 
-                    products.append(parsed_product)
+                    listing = data.get("data", {}).get("listing", {})
+                    page = listing.get("page", {})
+                    items = page.get("products") or []
 
-                products_after_page = len(products)
+                    print(f"PAGE {page_number} ITEMS:", len(items))
 
-                if products_after_page == products_before_page:
-                    print(f"PAGE {page_number}: no relevant products added")
+                    if (
+                        variant_index == 0
+                        and page_number == start_page
+                        and not items
+                        and len(query_variants) > 1
+                    ):
+                        print(
+                            "PAGE 1 ITEMS: 0 for original query; "
+                            "trying fallback query variants"
+                        )
+
+                    if not items:
+                        break
+
+                    variant_had_items = True
+                    products_before_page = len(variant_products)
+
+                    for item in items:
+                        product = item.get("product") or {}
+                        title = product.get("name") or ""
+                        is_service = bool(product.get("isService"))
+
+                        if is_service and not include_services:
+                            skipped_service += 1
+                            continue
+
+                        if get_product_price(product) is None:
+                            skipped_no_price += 1
+                            continue
+
+                        if is_wrong_category_product(title, category) and not include_services:
+                            skipped_wrong_category += 1
+                            continue
+
+                        parsed_product = parse_product_item(
+                            item=item,
+                            query=query_variant,
+                            category=category,
+                            source_page=page_number,
+                            strict_title_match=strict_title_match,
+                            include_services=include_services,
+                        )
+
+                        if not parsed_product:
+                            skipped_not_relevant += 1
+                            continue
+
+                        variant_products.append(parsed_product)
+
+                    products_after_page = len(variant_products)
+
+                    if products_after_page == products_before_page:
+                        print(f"PAGE {page_number}: no relevant products added")
+
+                if variant_products:
+                    products = variant_products
+                    print("USING QUERY VARIANT:", query_variant)
+                    print("USED SEARCH QUERY:", search_query)
+                    break
+
+                if variant_had_items:
+                    print("QUERY VARIANT HAD ITEMS BUT NO RELEVANT PRODUCTS:", query_variant)
+                else:
+                    print("QUERY VARIANT RETURNED 0 ITEMS:", query_variant)
 
     except Exception as error:
         print("GraphQL scraping error:", error)
-        return []
+        return ScrapeResult([], metadata)
 
     products = remove_duplicates(products)
+
+    if not products:
+        metadata["message"] = (
+            "No products found. Query was automatically simplified but still returned no results."
+        )
+        print(metadata["message"])
 
     print("SKIPPED SERVICE:", skipped_service)
     print("SKIPPED NO PRICE:", skipped_no_price)
@@ -388,4 +450,4 @@ async def scrape_products(
     print("SKIPPED NOT RELEVANT:", skipped_not_relevant)
     print("FINAL PRODUCTS:", len(products))
 
-    return products
+    return ScrapeResult(products, metadata)
